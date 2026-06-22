@@ -1,50 +1,42 @@
-
-"""
 ╔══════════════════════════════════════════════════════════════════════╗
 ║        FOOD ANALYSIS DASHBOARD  — Streamlit + PostgreSQL            ║
-║   Run:  streamlit run food_dashboard.py                              ║
+║    Run:  streamlit run food_dashboard.py                             ║
 ╚══════════════════════════════════════════════════════════════════════╝
- 
+
 Requirements (install once):
     pip install streamlit pandas plotly psycopg2-binary sqlalchemy
- 
-1. Edit DB_CONFIG with your PostgreSQL credentials.
-2. Add your PostgreSQL credentials to Streamlit Secrets (see Section 1 in the code).
-3. Run:  streamlit run food_dashboard.py
+
+1. Add your PostgreSQL credentials to Streamlit Secrets or fill them in the sidebar.
+2. Run:  streamlit run food_dashboard.py
 """
- 
+
 import os
 import re
 import tempfile
 from datetime import date
- 
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from sqlalchemy import create_engine, text
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. CONFIGURATION — reads from st.secrets (Streamlit Cloud) or env vars
+# 1. CONFIGURATION & FALLBACK UI
 # ─────────────────────────────────────────────────────────────────────────────
-# On Streamlit Cloud add these in App Settings → Secrets:
-#
-#   [postgres]
-#   host     = "your-host.neon.tech"      # or Supabase / Railway / ElephantSQL
-#   port     = 5432
-#   database = "Food_Analysis"
-#   user     = "food_user"
-#   password = "food1234"
-#
-# Alternatively set a single DATABASE_URL secret:
-#   DATABASE_URL = "postgresql://food_user:password@host:5432/Food_Analysis"
- 
 def _get_db_url() -> str | None:
-    """Return a SQLAlchemy DB URL from secrets or env, or None if not configured."""
+    """Return a SQLAlchemy DB URL from secrets, session state, or env vars."""
+    # Check if user injected credentials via fallback sidebar inputs
+    if st.session_state.get("db_host"):
+        return (
+            f"postgresql+psycopg2://{st.session_state.get('db_user')}:{st.session_state.get('db_password')}"
+            f"@{st.session_state.get('db_host')}:{st.session_state.get('db_port', 5432)}/{st.session_state.get('db_database')}"
+        )
+
     # 1) Single DATABASE_URL secret / env var
     url = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
     if url:
-        # Heroku-style URLs start with postgres:// — SQLAlchemy needs postgresql://
         return url.replace("postgres://", "postgresql+psycopg2://", 1)
+        
     # 2) Structured [postgres] secret block
     try:
         pg = st.secrets["postgres"]
@@ -54,7 +46,8 @@ def _get_db_url() -> str | None:
         )
     except (KeyError, FileNotFoundError):
         pass
-    # 3) Individual env vars (fallback for Docker / Railway / Render)
+        
+    # 3) Individual env vars
     host = os.environ.get("DB_HOST")
     if host:
         return (
@@ -62,9 +55,7 @@ def _get_db_url() -> str | None:
             f"@{host}:{os.environ.get('DB_PORT', 5432)}/{os.environ['DB_DATABASE']}"
         )
     return None
- 
-_DB_URL = _get_db_url()
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,17 +65,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. CUSTOM CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .stApp { background: #F3E5AB; }
- 
+
 section[data-testid="stSidebar"] { background: #1a3c5e; }
 section[data-testid="stSidebar"] * { color: #e8f0fe !important; }
- 
+
 .kpi-card {
     background: white;
     border-radius: 12px;
@@ -95,7 +86,7 @@ section[data-testid="stSidebar"] * { color: #e8f0fe !important; }
 }
 .kpi-value { font-size: 2.1rem; font-weight: 700; color: #1a3c5e; }
 .kpi-label { font-size: 0.85rem; color: #607d8b; margin-top: 2px; }
- 
+
 .section-header {
     background: linear-gradient(90deg,#1a3c5e,#2196F3);
     color: white;
@@ -115,34 +106,34 @@ section[data-testid="stSidebar"] * { color: #e8f0fe !important; }
 }
 </style>
 """, unsafe_allow_html=True)
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. DATABASE CONNECTION
+# 4. DATABASE CONNECTION WITH CACHE LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Connecting to database…")
-def get_engine():
-    if not _DB_URL:
-        st.error(
-            "⚙️ **Database not configured.** "
-            "Add your PostgreSQL credentials in **App Settings → Secrets** "
-            "(see the comment at the top of `food_dashboard.py` for the exact format), "
-            "then reboot the app."
-        )
-        st.stop()
-    return create_engine(_DB_URL, pool_pre_ping=True)
- 
- 
-@st.cache_data(ttl=120, show_spinner=False)
+def get_engine(url_str):
+    if not url_str:
+        return None
+    return create_engine(url_str, pool_pre_ping=True)
+
+
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
-    engine = get_engine()
+    _DB_URL = _get_db_url()
+    if not _DB_URL:
+        return pd.DataFrame() # Return empty layout safely if missing db URL
+    engine = get_engine(_DB_URL)
     with engine.connect() as conn:
         return pd.read_sql(text(sql), conn, params=params or {})
- 
- 
+
+
 def run_write(sql: str, params: dict | None = None) -> bool:
     """Execute INSERT / UPDATE / DELETE — returns True on success."""
+    _DB_URL = _get_db_url()
+    if not _DB_URL:
+        st.error("No database connection available to perform updates.")
+        return False
     try:
-        engine = get_engine()
+        engine = get_engine(_DB_URL)
         with engine.begin() as conn:
             conn.execute(text(sql), params or {})
         run_query.clear()
@@ -150,14 +141,18 @@ def run_write(sql: str, params: dict | None = None) -> bool:
     except Exception as exc:
         st.error(f"Database error: {exc}")
         return False
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. CSV IMPORT HELPER
 # ─────────────────────────────────────────────────────────────────────────────
-def import_csv(table: str, path: str, engine) -> tuple[bool, str]:
+def import_csv(table: str, path: str) -> tuple[bool, str]:
     if not os.path.exists(path):
         return False, f"File not found: {path}"
+    _DB_URL = _get_db_url()
+    if not _DB_URL:
+        return False, "Database not configured."
     try:
+        engine = get_engine(_DB_URL)
         df = pd.read_csv(path)
         df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
         for col in df.columns:
@@ -167,14 +162,14 @@ def import_csv(table: str, path: str, engine) -> tuple[bool, str]:
         return True, f"✅ Imported {len(df):,} rows into **{table}**"
     except Exception as exc:
         return False, f"❌ {table}: {exc}"
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. SIDEBAR NAVIGATION & CRUD FILTERS
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🍱 Food Analysis")
     st.markdown("---")
- 
+
     page = st.radio(
         "Navigate",
         [
@@ -190,85 +185,109 @@ with st.sidebar:
         ],
         label_visibility="collapsed",
     )
- 
+
     st.markdown("---")
+    
+    # Render Fallback connection panel if secrets are empty
+    if not _get_db_url():
+        st.markdown("### ⚙️ DB Credentials Missing")
+        st.caption("Provide connection details here directly to test the app live:")
+        with st.form("sidebar_connection_form"):
+            host_in = st.text_input("Host")
+            db_in = st.text_input("Database Name", value="Food_Analysis")
+            user_in = st.text_input("User")
+            pass_in = st.text_input("Password", type="password")
+            port_in = st.number_input("Port", value=5432)
+            connect_btn = st.form_submit_button("Connect Live DB")
+            
+            if connect_btn:
+                st.session_state["db_host"] = host_in
+                st.session_state["db_database"] = db_in
+                st.session_state["db_user"] = user_in
+                st.session_state["db_password"] = pass_in
+                st.session_state["db_port"] = port_in
+                st.rerun()
+        st.markdown("---")
+
     st.markdown("### 🔍 CRUD Filters")
- 
+
+    # Fetch unique selections safely
+    try:
+        cities_df = run_query(
+            "SELECT DISTINCT city FROM providers "
+            "UNION SELECT DISTINCT city FROM receivers ORDER BY city"
+        )
+        all_cities = ["All"] + cities_df["city"].dropna().tolist() if not cities_df.empty else ["All"]
+    except Exception:
+        all_cities = ["All"]
+
+    try:
+        ft_df  = run_query("SELECT DISTINCT food_type FROM food_listings ORDER BY food_type")
+        all_ft = ["All"] + ft_df["food_type"].dropna().tolist() if not ft_df.empty else ["All"]
+    except Exception:
+        all_ft = ["All"]
+
+    try:
+        mt_df  = run_query("SELECT DISTINCT meal_type FROM food_listings ORDER BY meal_type")
+        all_mt = ["All"] + mt_df["meal_type"].dropna().tolist() if not mt_df.empty else ["All"]
+    except Exception:
+        all_mt = ["All"]
+
+    try:
+        cs_df  = run_query("SELECT DISTINCT status FROM claims ORDER BY status")
+        all_cs = ["All"] + cs_df["status"].dropna().tolist() if not cs_df.empty else ["All"]
+    except Exception:
+        all_cs = ["All"]
+
+    # Form containing variables 
     with st.form("crud_filters_form"):
-        try:
-            cities_df = run_query(
-                "SELECT DISTINCT city FROM providers "
-                "UNION SELECT DISTINCT city FROM receivers ORDER BY city"
-            )
-            all_cities = ["All"] + cities_df["city"].dropna().tolist()
-        except Exception:
-            all_cities = ["All"]
- 
         sel_city = st.selectbox("City", all_cities)
- 
-        try:
-            ft_df  = run_query("SELECT DISTINCT food_type FROM food_listings ORDER BY food_type")
-            all_ft = ["All"] + ft_df["food_type"].dropna().tolist()
-        except Exception:
-            all_ft = ["All"]
- 
         sel_ft = st.selectbox("Food Type", all_ft)
- 
-        try:
-            mt_df  = run_query("SELECT DISTINCT meal_type FROM food_listings ORDER BY meal_type")
-            all_mt = ["All"] + mt_df["meal_type"].dropna().tolist()
-        except Exception:
-            all_mt = ["All"]
- 
         sel_mt = st.selectbox("Meal Type", all_mt)
- 
-        try:
-            cs_df  = run_query("SELECT DISTINCT status FROM claims ORDER BY status")
-            all_cs = ["All"] + cs_df["status"].dropna().tolist()
-        except Exception:
-            all_cs = ["All"]
- 
         sel_cs = st.selectbox("Claim Status", all_cs)
- 
         filters_submitted = st.form_submit_button("Apply Filters", use_container_width=True)
- 
-    # Store active filter values in session state on submit
+
+    # RESOLVED SUBMIT BUTTON WARNING: Action statement executes properly outside form container
     if filters_submitted:
         st.session_state["active_city"] = sel_city
         st.session_state["active_ft"]   = sel_ft
         st.session_state["active_mt"]   = sel_mt
         st.session_state["active_cs"]   = sel_cs
- 
-    # Read active filters from session state (default to "All" on first load)
+
+    # Read current active selections
     active_city = st.session_state.get("active_city", "All")
     active_ft   = st.session_state.get("active_ft",   "All")
     active_mt   = st.session_state.get("active_mt",   "All")
     active_cs   = st.session_state.get("active_cs",   "All")
- 
+
     city_filter = None if active_city == "All" else active_city
     ft_filter   = None if active_ft   == "All" else active_ft
     mt_filter   = None if active_mt   == "All" else active_mt
     cs_filter   = None if active_cs   == "All" else active_cs
- 
+
     st.markdown("---")
     if st.button("🔄 Refresh Data Cache"):
         run_query.clear()
         st.success("Cache cleared!")
- 
- 
+
 def build_where(*conditions):
-    """Return a WHERE clause string from a list of non-empty condition strings."""
     parts = [c for c in conditions if c]
     return ("WHERE " + " AND ".join(parts)) if parts else ""
- 
+
+# Check for validation configurations globally
+if not _get_db_url():
+    st.title("🍱 Food Analysis Dashboard")
+    st.info("👋 Welcome! Your dashboard deployment framework is running smoothly.")
+    st.warning("⚠️ **Database connection config required.** Please fill out the connection manager panel on the left sidebar, or embed your `[postgres]` configurations within Streamlit Secrets settings to populate the live charts.")
+    st.stop()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. PAGE: OVERVIEW
 # ─────────────────────────────────────────────────────────────────────────────
 if page == "🏠 Overview":
     st.title("🍱 Food Analysis Dashboard")
     st.caption("Real-time insights from the Food Management database")
- 
-    # KPIs
+
     try:
         kpi_prov   = run_query("SELECT COUNT(*) AS n FROM providers")["n"][0]
         kpi_recv   = run_query("SELECT COUNT(*) AS n FROM receivers")["n"][0]
@@ -276,7 +295,7 @@ if page == "🏠 Overview":
         kpi_claims = run_query("SELECT COUNT(*) AS n FROM claims")["n"][0]
         kpi_qty    = run_query("SELECT COALESCE(SUM(quantity),0) AS n FROM food_listings")["n"][0]
         kpi_comp   = run_query("SELECT COUNT(*) AS n FROM claims WHERE LOWER(status)='completed'")["n"][0]
- 
+
         def kpi_card(col, label, value, color="#2196F3", suffix=""):
             col.markdown(
                 f'<div class="kpi-card" style="border-left-color:{color}">'
@@ -284,7 +303,7 @@ if page == "🏠 Overview":
                 f'<div class="kpi-label">{label}</div></div>',
                 unsafe_allow_html=True,
             )
- 
+
         c1, c2, c3 = st.columns(3)
         c4, c5, c6 = st.columns(3)
         kpi_card(c1, "Total Providers",     kpi_prov,   "#2196F3")
@@ -293,51 +312,55 @@ if page == "🏠 Overview":
         kpi_card(c4, "Total Claims",        kpi_claims, "#9C27B0")
         kpi_card(c5, "Total Food Quantity", kpi_qty,    "#F44336", suffix=" units")
         kpi_card(c6, "Completed Claims",    kpi_comp,   "#009688")
- 
+
     except Exception as exc:
         st.error(f"KPI load error: {exc}")
- 
+
     st.markdown('<div class="section-header">📈 Quick Charts</div>', unsafe_allow_html=True)
- 
+
     try:
         c1, c2 = st.columns(2)
         with c1:
             df = run_query("SELECT type, COUNT(*) AS total FROM providers GROUP BY type ORDER BY total DESC")
-            fig = px.pie(df, names="type", values="total", title="Providers by Type",
-                         color_discrete_sequence=px.colors.qualitative.Set2)
-            st.plotly_chart(fig, use_container_width=True)
- 
+            if not df.empty:
+                fig = px.pie(df, names="type", values="total", title="Providers by Type",
+                             color_discrete_sequence=px.colors.qualitative.Set2)
+                st.plotly_chart(fig, use_container_width=True)
+
         with c2:
             df = run_query("SELECT food_type, SUM(quantity) AS total FROM food_listings GROUP BY food_type ORDER BY total DESC")
-            fig = px.bar(df, x="food_type", y="total", title="Food Quantity by Type",
-                         color="food_type", color_discrete_sequence=px.colors.qualitative.Pastel)
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
- 
+            if not df.empty:
+                fig = px.bar(df, x="food_type", y="total", title="Food Quantity by Type",
+                             color="food_type", color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
         c3, c4 = st.columns(2)
         with c3:
             df = run_query("SELECT status, COUNT(*) AS n FROM claims GROUP BY status")
-            fig = px.pie(df, names="status", values="n", title="Claims by Status",
-                         color_discrete_sequence=px.colors.qualitative.Safe, hole=0.4)
-            st.plotly_chart(fig, use_container_width=True)
- 
+            if not df.empty:
+                fig = px.pie(df, names="status", values="n", title="Claims by Status",
+                             color_discrete_sequence=px.colors.qualitative.Safe, hole=0.4)
+                st.plotly_chart(fig, use_container_width=True)
+
         with c4:
             df = run_query("SELECT meal_type, SUM(quantity) AS total FROM food_listings GROUP BY meal_type ORDER BY total DESC")
-            fig = px.bar(df, x="meal_type", y="total", title="Quantity by Meal Type",
-                         color="meal_type", color_discrete_sequence=px.colors.qualitative.Bold)
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
- 
+            if not df.empty:
+                fig = px.bar(df, x="meal_type", y="total", title="Quantity by Meal Type",
+                             color="meal_type", color_discrete_sequence=px.colors.qualitative.Bold)
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
     except Exception as exc:
         st.error(f"Chart error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. PAGE: PROVIDERS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📦 Providers":
     st.title("📦 Providers")
     search = st.text_input("🔎 Search provider name or city")
- 
+
     try:
         conditions = []
         if city_filter:
@@ -345,7 +368,7 @@ elif page == "📦 Providers":
         if search:
             safe = search.lower().replace("'", "''")
             conditions.append(f"(LOWER(p.name) LIKE '%{safe}%' OR LOWER(p.city) LIKE '%{safe}%')")
- 
+
         sql = f"""
             SELECT p.provider_id, p.name, p.type, p.city, p.address, p.contact,
                    COUNT(f.food_id)            AS listings,
@@ -359,31 +382,32 @@ elif page == "📦 Providers":
         df = run_query(sql)
         st.markdown(f"**{len(df):,} providers found**")
         st.dataframe(df, use_container_width=True, height=350)
- 
-        c1, c2 = st.columns(2)
-        with c1:
-            g = df.groupby("city")["total_donated"].sum().reset_index().sort_values("total_donated", ascending=False)
-            fig = px.bar(g, x="city", y="total_donated", title="Total Donated by City",
-                         color="total_donated", color_continuous_scale="Blues")
-            st.plotly_chart(fig, use_container_width=True)
- 
-        with c2:
-            g = df.groupby("type")["provider_id"].count().reset_index()
-            g.columns = ["type", "count"]
-            fig = px.pie(g, names="type", values="count", title="Provider Types",
-                         color_discrete_sequence=px.colors.qualitative.Set3)
-            st.plotly_chart(fig, use_container_width=True)
- 
+
+        if not df.empty:
+            c1, c2 = st.columns(2)
+            with c1:
+                g = df.groupby("city")["total_donated"].sum().reset_index().sort_values("total_donated", ascending=False)
+                fig = px.bar(g, x="city", y="total_donated", title="Total Donated by City",
+                             color="total_donated", color_continuous_scale="Blues")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                g = df.groupby("type")["provider_id"].count().reset_index()
+                g.columns = ["type", "count"]
+                fig = px.pie(g, names="type", values="count", title="Provider Types",
+                             color_discrete_sequence=px.colors.qualitative.Set3)
+                st.plotly_chart(fig, use_container_width=True)
+
     except Exception as exc:
         st.error(f"Providers page error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. PAGE: RECEIVERS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🤝 Receivers":
     st.title("🤝 Receivers")
     search = st.text_input("🔎 Search receiver name or city")
- 
+
     try:
         conditions = []
         if city_filter:
@@ -391,7 +415,7 @@ elif page == "🤝 Receivers":
         if search:
             safe = search.lower().replace("'", "''")
             conditions.append(f"(LOWER(r.name) LIKE '%{safe}%' OR LOWER(r.city) LIKE '%{safe}%')")
- 
+
         sql = f"""
             SELECT r.receiver_id, r.name, r.type, r.city, r.contact,
                    COUNT(c.claim_id)             AS total_claims,
@@ -407,31 +431,32 @@ elif page == "🤝 Receivers":
         df = run_query(sql)
         st.markdown(f"**{len(df):,} receivers found**")
         st.dataframe(df, use_container_width=True, height=350)
- 
-        c1, c2 = st.columns(2)
-        with c1:
-            g = df.groupby("city")["total_claimed_qty"].sum().reset_index().sort_values("total_claimed_qty", ascending=False)
-            fig = px.bar(g, x="city", y="total_claimed_qty", title="Total Claimed Qty by City",
-                         color="total_claimed_qty", color_continuous_scale="Greens")
-            st.plotly_chart(fig, use_container_width=True)
- 
-        with c2:
-            g = df.groupby("type")["receiver_id"].count().reset_index()
-            g.columns = ["type", "count"]
-            fig = px.pie(g, names="type", values="count", title="Receiver Types",
-                         color_discrete_sequence=px.colors.qualitative.Pastel)
-            st.plotly_chart(fig, use_container_width=True)
- 
+
+        if not df.empty:
+            c1, c2 = st.columns(2)
+            with c1:
+                g = df.groupby("city")["total_claimed_qty"].sum().reset_index().sort_values("total_claimed_qty", ascending=False)
+                fig = px.bar(g, x="city", y="total_claimed_qty", title="Total Claimed Qty by City",
+                             color="total_claimed_qty", color_continuous_scale="Greens")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                g = df.groupby("type")["receiver_id"].count().reset_index()
+                g.columns = ["type", "count"]
+                fig = px.pie(g, names="type", values="count", title="Receiver Types",
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.plotly_chart(fig, use_container_width=True)
+
     except Exception as exc:
         st.error(f"Receivers page error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. PAGE: FOOD LISTINGS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🥗 Food Listings":
     st.title("🥗 Food Listings")
     search = st.text_input("🔎 Search food name")
- 
+
     try:
         conditions = []
         if ft_filter:
@@ -443,7 +468,7 @@ elif page == "🥗 Food Listings":
         if search:
             safe = search.lower().replace("'", "''")
             conditions.append(f"LOWER(f.food_name) LIKE '%{safe}%'")
- 
+
         sql = f"""
             SELECT f.food_id, f.food_name, f.quantity, f.expiry_date,
                    f.food_type, f.meal_type, f.location, f.provider_type,
@@ -454,55 +479,56 @@ elif page == "🥗 Food Listings":
             ORDER BY f.quantity DESC
         """
         df = run_query(sql)
- 
+
         today = pd.Timestamp(date.today())
         if "expiry_date" in df.columns:
             df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce")
             df["expiry_status"] = df["expiry_date"].apply(
                 lambda d: "🔴 Expired" if pd.notna(d) and d < today else "🟢 Valid"
             )
- 
-        st.markdown(f"**{len(df):,} listings | Total Qty: {int(df['quantity'].sum()):,}**")
+
+        st.markdown(f"**{len(df):,} listings | Total Qty: {int(df['quantity'].sum()) if not df.empty else 0:,}**")
         st.dataframe(df, use_container_width=True, height=350)
- 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            g = df.groupby("food_type")["quantity"].sum().reset_index()
-            fig = px.bar(g, x="food_type", y="quantity", title="Qty by Food Type",
-                         color="food_type", color_discrete_sequence=px.colors.qualitative.Set1)
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
- 
-        with c2:
-            g = df.groupby("meal_type")["quantity"].sum().reset_index()
-            fig = px.pie(g, names="meal_type", values="quantity", title="Qty by Meal Type",
-                         color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.35)
-            st.plotly_chart(fig, use_container_width=True)
- 
-        with c3:
-            if "expiry_status" in df.columns:
-                g = df["expiry_status"].value_counts().reset_index()
-                g.columns = ["status", "count"]
-                fig = px.pie(g, names="status", values="count", title="Expiry Status",
-                             color_discrete_map={"🟢 Valid": "#4CAF50", "🔴 Expired": "#F44336"})
+
+        if not df.empty:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                g = df.groupby("food_type")["quantity"].sum().reset_index()
+                fig = px.bar(g, x="food_type", y="quantity", title="Qty by Food Type",
+                             color="food_type", color_discrete_sequence=px.colors.qualitative.Set1)
+                fig.update_layout(showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
- 
-        st.markdown('<div class="section-header">🔥 Food Type × Meal Type Heatmap</div>', unsafe_allow_html=True)
-        pivot = df.pivot_table(index="food_type", columns="meal_type", values="quantity",
-                               aggfunc="sum", fill_value=0)
-        fig = px.imshow(pivot, text_auto=True, color_continuous_scale="Blues",
-                        title="Quantity Heatmap (Food Type × Meal Type)")
-        st.plotly_chart(fig, use_container_width=True)
- 
+
+            with c2:
+                g = df.groupby("meal_type")["quantity"].sum().reset_index()
+                fig = px.pie(g, names="meal_type", values="quantity", title="Qty by Meal Type",
+                             color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.35)
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c3:
+                if "expiry_status" in df.columns:
+                    g = df["expiry_status"].value_counts().reset_index()
+                    g.columns = ["status", "count"]
+                    fig = px.pie(g, names="status", values="count", title="Expiry Status",
+                                 color_discrete_map={"🟢 Valid": "#4CAF50", "🔴 Expired": "#F44336"})
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('<div class="section-header">🔥 Food Type × Meal Type Heatmap</div>', unsafe_allow_html=True)
+            pivot = df.pivot_table(index="food_type", columns="meal_type", values="quantity",
+                                   aggfunc="sum", fill_value=0)
+            fig = px.imshow(pivot, text_auto=True, color_continuous_scale="Blues",
+                            title="Quantity Heatmap (Food Type × Meal Type)")
+            st.plotly_chart(fig, use_container_width=True)
+
     except Exception as exc:
         st.error(f"Food Listings page error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. PAGE: CLAIMS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📋 Claims":
     st.title("📋 Claims")
- 
+
     try:
         conditions = []
         if cs_filter:
@@ -513,7 +539,7 @@ elif page == "📋 Claims":
             conditions.append(f"f.meal_type = '{mt_filter}'")
         if city_filter:
             conditions.append(f"r.city = '{city_filter}'")
- 
+
         sql = f"""
             SELECT c.claim_id, c.status, c.claim_timestamp,
                    f.food_name, f.food_type, f.meal_type, f.quantity,
@@ -529,116 +555,119 @@ elif page == "📋 Claims":
         df = run_query(sql)
         st.markdown(f"**{len(df):,} claims**")
         st.dataframe(df, use_container_width=True, height=350)
- 
-        c1, c2 = st.columns(2)
-        with c1:
-            g = df.groupby("status")["claim_id"].count().reset_index()
-            g.columns = ["status", "count"]
-            fig = px.bar(g, x="status", y="count", title="Claims by Status",
-                         color="status", color_discrete_sequence=px.colors.qualitative.Safe)
-            st.plotly_chart(fig, use_container_width=True)
- 
-        with c2:
-            g = df.groupby("meal_type")["claim_id"].count().reset_index()
-            g.columns = ["meal_type", "count"]
-            fig = px.pie(g, names="meal_type", values="count", title="Claims by Meal Type",
-                         color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.35)
-            st.plotly_chart(fig, use_container_width=True)
- 
-        st.markdown('<div class="section-header">🏆 Provider Claim Success Rate</div>', unsafe_allow_html=True)
-        rate_df = run_query("""
-            SELECT p.name,
-                   ROUND(
-                       SUM(CASE WHEN LOWER(c.status) = 'completed' THEN 1 ELSE 0 END) * 100.0
-                       / NULLIF(COUNT(c.claim_id), 0), 1
-                   ) AS success_rate
-            FROM providers p
-            JOIN food_listings f ON p.provider_id = f.provider_id
-            JOIN claims c        ON f.food_id     = c.food_id
-            GROUP BY p.name
-            ORDER BY success_rate DESC
-        """)
-        fig = px.bar(rate_df, x="name", y="success_rate",
-                     title="Success Rate % by Provider",
-                     labels={"name": "Provider", "success_rate": "Success Rate (%)"},
-                     color="success_rate", color_continuous_scale="RdYlGn",
-                     range_color=[0, 100])
-        fig.update_xaxes(tickangle=-35)
-        st.plotly_chart(fig, use_container_width=True)
- 
-        if "claim_timestamp" in df.columns:
-            st.markdown('<div class="section-header">📅 Claim Timeline</div>', unsafe_allow_html=True)
-            timeline = df.copy()
-            timeline["claim_timestamp"] = pd.to_datetime(timeline["claim_timestamp"], errors="coerce")
-            timeline = timeline.dropna(subset=["claim_timestamp"])
-            if not timeline.empty:
-                timeline["month"] = timeline["claim_timestamp"].dt.to_period("M").astype(str)
-                g = timeline.groupby(["month", "status"])["claim_id"].count().reset_index()
-                fig = px.bar(g, x="month", y="claim_id", color="status",
-                             barmode="stack", title="Monthly Claims by Status",
-                             labels={"claim_id": "Claims", "month": "Month"})
+
+        if not df.empty:
+            c1, c2 = st.columns(2)
+            with c1:
+                g = df.groupby("status")["claim_id"].count().reset_index()
+                g.columns = ["status", "count"]
+                fig = px.bar(g, x="status", y="count", title="Claims by Status",
+                             color="status", color_discrete_sequence=px.colors.qualitative.Safe)
                 st.plotly_chart(fig, use_container_width=True)
- 
-        st.markdown('<div class="section-header">🌆 Demand by City & Meal Type</div>', unsafe_allow_html=True)
-        dem_df = run_query("""
-            SELECT r.city, f.meal_type, COUNT(c.claim_id) AS demand_count
-            FROM receivers r
-            JOIN claims c        ON r.receiver_id = c.receiver_id
-            JOIN food_listings f ON c.food_id     = f.food_id
-            GROUP BY r.city, f.meal_type
-            ORDER BY demand_count DESC
-        """)
-        fig = px.sunburst(dem_df, path=["city", "meal_type"], values="demand_count",
-                          title="Demand: City → Meal Type",
-                          color="demand_count", color_continuous_scale="Oranges")
-        st.plotly_chart(fig, use_container_width=True)
- 
+
+            with c2:
+                g = df.groupby("meal_type")["claim_id"].count().reset_index()
+                g.columns = ["meal_type", "count"]
+                fig = px.pie(g, names="meal_type", values="count", title="Claims by Meal Type",
+                             color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.35)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('<div class="section-header">🏆 Provider Claim Success Rate</div>', unsafe_allow_html=True)
+            rate_df = run_query("""
+                SELECT p.name,
+                       ROUND(
+                           SUM(CASE WHEN LOWER(c.status) = 'completed' THEN 1 ELSE 0 END) * 100.0
+                           / NULLIF(COUNT(c.claim_id), 0), 1
+                       ) AS success_rate
+                FROM providers p
+                JOIN food_listings f ON p.provider_id = f.provider_id
+                JOIN claims c        ON f.food_id     = c.food_id
+                GROUP BY p.name
+                ORDER BY success_rate DESC
+            """)
+            if not rate_df.empty:
+                fig = px.bar(rate_df, x="name", y="success_rate",
+                             title="Success Rate % by Provider",
+                             labels={"name": "Provider", "success_rate": "Success Rate (%)"},
+                             color="success_rate", color_continuous_scale="RdYlGn",
+                             range_color=[0, 100])
+                fig.update_xaxes(tickangle=-35)
+                st.plotly_chart(fig, use_container_width=True)
+
+            if "claim_timestamp" in df.columns:
+                st.markdown('<div class="section-header">📅 Claim Timeline</div>', unsafe_allow_html=True)
+                timeline = df.copy()
+                timeline["claim_timestamp"] = pd.to_datetime(timeline["claim_timestamp"], errors="coerce")
+                timeline = timeline.dropna(subset=["claim_timestamp"])
+                if not timeline.empty:
+                    timeline["month"] = timeline["claim_timestamp"].dt.to_period("M").astype(str)
+                    g = timeline.groupby(["month", "status"])["claim_id"].count().reset_index()
+                    fig = px.bar(g, x="month", y="claim_id", color="status",
+                                 barmode="stack", title="Monthly Claims by Status",
+                                 labels={"claim_id": "Claims", "month": "Month"})
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('<div class="section-header">🌆 Demand by City & Meal Type</div>', unsafe_allow_html=True)
+            dem_df = run_query("""
+                SELECT r.city, f.meal_type, COUNT(c.claim_id) AS demand_count
+                FROM receivers r
+                JOIN claims c        ON r.receiver_id = c.receiver_id
+                JOIN food_listings f ON c.food_id     = f.food_id
+                GROUP BY r.city, f.meal_type
+                ORDER BY demand_count DESC
+            """)
+            if not dem_df.empty:
+                fig = px.sunburst(dem_df, path=["city", "meal_type"], values="demand_count",
+                                  title="Demand: City → Meal Type",
+                                  color="demand_count", color_continuous_scale="Oranges")
+                st.plotly_chart(fig, use_container_width=True)
+
     except Exception as exc:
         st.error(f"Claims page error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 12. PAGE: ANALYSIS — All 17 Business Questions
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📊 Analysis":
     st.title("📊 Analysis — All 17 Business Questions")
- 
+
     QUESTIONS: dict[str, str | None] = {
         "Q1 · Providers per City": """
             SELECT city, COUNT(*) AS provider_count
             FROM providers GROUP BY city ORDER BY provider_count DESC""",
- 
+
         "Q2 · Receivers per City": """
             SELECT city, COUNT(*) AS receiver_count
             FROM receivers GROUP BY city ORDER BY receiver_count DESC""",
- 
+
         "Q3 · Provider Type with Highest Quantity": """
             SELECT provider_type, SUM(quantity) AS total_quantity
             FROM food_listings GROUP BY provider_type ORDER BY total_quantity DESC LIMIT 1""",
- 
+
         "Q4 · Providers in Selected City": None,
- 
+
         "Q5 · Receivers by Total Claimed Quantity": """
             SELECT r.name, SUM(f.quantity) AS total_claimed
             FROM receivers r
             JOIN claims c       ON r.receiver_id = c.receiver_id
             JOIN food_listings f ON c.food_id    = f.food_id
             GROUP BY r.name ORDER BY total_claimed DESC""",
- 
+
         "Q6 · Total Available Food Quantity": """
             SELECT SUM(quantity) AS total_available FROM food_listings""",
- 
+
         "Q7 · Location with Most Listings": """
             SELECT location, COUNT(*) AS listing_count
             FROM food_listings GROUP BY location ORDER BY listing_count DESC LIMIT 1""",
- 
+
         "Q8 · Food Availability by Food Type": """
             SELECT food_type, COUNT(*) AS availability_count
             FROM food_listings GROUP BY food_type ORDER BY availability_count DESC""",
- 
+
         "Q9 · Claims Count per Food Item": """
             SELECT food_id, COUNT(*) AS claim_count
             FROM claims GROUP BY food_id ORDER BY claim_count DESC""",
- 
+
         "Q10 · Provider with Most Completed Claims": """
             SELECT p.name, COUNT(c.claim_id) AS success_count
             FROM providers p
@@ -646,38 +675,38 @@ elif page == "📊 Analysis":
             JOIN claims c        ON f.food_id     = c.food_id
             WHERE LOWER(c.status) = 'completed'
             GROUP BY p.name ORDER BY success_count DESC LIMIT 1""",
- 
+
         "Q11 · Claim Status Percentage": """
             SELECT status,
                    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2) AS percentage
             FROM claims GROUP BY status""",
- 
+
         "Q12 · Average Quantity per Receiver": """
             SELECT r.name, ROUND(AVG(f.quantity), 2) AS avg_quantity
             FROM receivers r
             JOIN claims c       ON r.receiver_id = c.receiver_id
             JOIN food_listings f ON c.food_id    = f.food_id
             GROUP BY r.name ORDER BY avg_quantity DESC""",
- 
+
         "Q13 · Most Claimed Meal Type": """
             SELECT f.meal_type, COUNT(c.claim_id) AS claim_count
             FROM food_listings f
             JOIN claims c ON f.food_id = c.food_id
             GROUP BY f.meal_type ORDER BY claim_count DESC LIMIT 1""",
- 
+
         "Q14 · Total Donated per Provider": """
             SELECT p.name, SUM(f.quantity) AS total_donated
             FROM providers p
             JOIN food_listings f ON p.provider_id = f.provider_id
             GROUP BY p.name ORDER BY total_donated DESC""",
- 
+
         "Q15 · Food Wasted (Expired, Unclaimed)": """
             SELECT f.food_type, SUM(f.quantity) AS total_wasted_quantity
             FROM food_listings f
             LEFT JOIN claims c ON f.food_id = c.food_id
             WHERE c.claim_id IS NULL AND f.expiry_date < CURRENT_DATE
             GROUP BY f.food_type ORDER BY total_wasted_quantity DESC""",
- 
+
         "Q16 · Provider Success Rate (%)": """
             SELECT p.name,
                    ROUND(
@@ -688,7 +717,7 @@ elif page == "📊 Analysis":
             JOIN food_listings f ON p.provider_id = f.provider_id
             JOIN claims c        ON f.food_id     = c.food_id
             GROUP BY p.name ORDER BY success_rate_percentage DESC""",
- 
+
         "Q17 · Demand by City & Meal Type": """
             SELECT r.city, f.meal_type, COUNT(c.claim_id) AS demand_count
             FROM receivers r
@@ -696,9 +725,9 @@ elif page == "📊 Analysis":
             JOIN food_listings f ON c.food_id    = f.food_id
             GROUP BY r.city, f.meal_type ORDER BY demand_count DESC""",
     }
- 
+
     selected_q = st.selectbox("Select a question to analyse", list(QUESTIONS.keys()))
- 
+
     if selected_q == "Q4 · Providers in Selected City":
         city_input = st.text_input("Enter City Name", value=city_filter or "")
         if city_input:
@@ -716,45 +745,47 @@ elif page == "📊 Analysis":
             try:
                 df = run_query(sql)
                 st.dataframe(df, use_container_width=True)
- 
-                num_cols = df.select_dtypes(include="number").columns.tolist()
-                cat_cols = df.select_dtypes(exclude="number").columns.tolist()
- 
-                if cat_cols and num_cols:
-                    x_col, y_col = cat_cols[0], num_cols[0]
-                    if len(df) == 1:
-                        val  = df[y_col].iloc[0]
-                        name = df[x_col].iloc[0]
-                        st.metric(label=f"{y_col} ({name})", value=f"{val:,.2f}")
-                    elif len(df) <= 6:
-                        fig = px.pie(df, names=x_col, values=y_col, title=selected_q,
-                                     color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        fig = px.bar(df, x=x_col, y=y_col, title=selected_q,
-                                     color=y_col, color_continuous_scale="Blues")
-                        fig.update_xaxes(tickangle=-35)
-                        st.plotly_chart(fig, use_container_width=True)
- 
-                elif len(num_cols) == 1 and not cat_cols:
-                    st.metric(selected_q, f"{df[num_cols[0]].iloc[0]:,.0f}")
- 
-                csv = df.to_csv(index=False).encode()
-                st.download_button(
-                    "⬇️ Download Results as CSV", csv,
-                    file_name=f"{re.sub(r'[^a-z0-9]', '_', selected_q.lower())}.csv",
-                    mime="text/csv",
-                )
+
+                if not df.empty:
+                    num_cols = df.select_dtypes(include="number").columns.tolist()
+                    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+
+                    if cat_cols and num_cols:
+                        x_col, y_col = cat_cols[0], num_cols[0]
+                        if len(df) == 1:
+                            val  = df[y_col].iloc[0]
+                            name = df[x_col].iloc[0]
+                            st.metric(label=f"{y_col} ({name})", value=f"{val:,.2f}")
+                        elif len(df) <= 6:
+                            fig = px.pie(df, names=x_col, values=y_col, title=selected_q,
+                                         color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            fig = px.bar(df, x=x_col, y=y_col, title=selected_q,
+                                         color=y_col, color_continuous_scale="Blues")
+                            fig.update_xaxes(tickangle=-35)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    elif len(num_cols) == 1 and not cat_cols:
+                        st.metric(selected_q, f"{df[num_cols[0]].iloc[0]:,.0f}")
+
+                if not df.empty:
+                    csv = df.to_csv(index=False).encode()
+                    st.download_button(
+                        "⬇️ Download Results as CSV", csv,
+                        file_name=f"{re.sub(r'[^a-z0-9]', '_', selected_q.lower())}.csv",
+                        mime="text/csv",
+                    )
             except Exception as exc:
                 st.error(f"Query error: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 13. PAGE: CRUD OPERATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "✏️ CRUD Operations":
     st.title("✏️ CRUD Operations")
     st.caption("Create, Read, Update and Delete records across all tables")
- 
+
     crud_table = st.selectbox(
         "Select Table",
         ["providers", "receivers", "food_listings", "claims"],
@@ -767,8 +798,7 @@ elif page == "✏️ CRUD Operations":
         key="crud_op_radio",
     )
     st.markdown("---")
- 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+
     def load_table_filtered(table: str) -> pd.DataFrame:
         conds = []
         if table == "providers" and city_filter:
@@ -785,7 +815,7 @@ elif page == "✏️ CRUD Operations":
         elif table == "claims" and cs_filter:
             conds.append(f"status = '{cs_filter}'")
         return run_query(f"SELECT * FROM {table} {build_where(*conds)} ORDER BY 1")
- 
+
     def dropdown_options(table: str, id_col: str, name_col: str, scope_city: str | None = None) -> dict:
         try:
             city_col = "location" if table == "food_listings" else "city"
@@ -797,17 +827,16 @@ elif page == "✏️ CRUD Operations":
             return {f"{r[name_col]} ({r[id_col]})": r[id_col] for _, r in rows.iterrows()}
         except Exception:
             return {}
- 
+
     PROVIDER_TYPES = ["Restaurant", "Grocery Store", "Bakery", "Catering", "Farm", "Other"]
     RECEIVER_TYPES = ["NGO", "Shelter", "School", "Hospital", "Individual", "Other"]
     FOOD_TYPES     = ["Vegetarian", "Non-Vegetarian", "Vegan", "Gluten-Free", "Other"]
     MEAL_TYPES     = ["Breakfast", "Lunch", "Dinner", "Snack", "Any"]
     CLAIM_STATUSES = ["Pending", "Completed", "Cancelled"]
- 
-    # ══════ CREATE ════════════════════════════════════════════════════════════
+
     if crud_op == "➕ Create":
         st.markdown('<div class="section-header">➕ Add New Record</div>', unsafe_allow_html=True)
- 
+
         if crud_table == "providers":
             with st.form("form_create_provider", clear_on_submit=True):
                 st.subheader("New Provider")
@@ -830,7 +859,7 @@ elif page == "✏️ CRUD Operations":
                              city=prov_city, address=prov_addr, contact=prov_cont),
                     ):
                         st.success(f"Provider '{prov_name}' added successfully!")
- 
+
         elif crud_table == "receivers":
             with st.form("form_create_receiver", clear_on_submit=True):
                 st.subheader("New Receiver")
@@ -852,7 +881,7 @@ elif page == "✏️ CRUD Operations":
                              city=rec_city, contact=rec_cont),
                     ):
                         st.success(f"Receiver '{rec_name}' added successfully!")
- 
+
         elif crud_table == "food_listings":
             prov_opts = dropdown_options("providers", "provider_id", "name", city_filter)
             with st.form("form_create_food", clear_on_submit=True):
@@ -887,7 +916,7 @@ elif page == "✏️ CRUD Operations":
                              provider_id=prov_opts[prov_label]),
                     ):
                         st.success(f"Food listing '{food_name}' created!")
- 
+
         elif crud_table == "claims":
             food_opts = dropdown_options("food_listings", "food_id", "food_name", city_filter)
             recv_opts = dropdown_options("receivers", "receiver_id", "name", city_filter)
@@ -918,31 +947,30 @@ elif page == "✏️ CRUD Operations":
                              claim_timestamp=str(claim_ts)),
                     ):
                         st.success(f"Claim '{claim_id}' created!")
- 
-    # ══════ READ ══════════════════════════════════════════════════════════════
+
     elif crud_op == "📖 Read":
         st.markdown('<div class="section-header">📖 View Records</div>', unsafe_allow_html=True)
         st.info("Global sidebar filters are applied automatically.")
- 
+
         search_read = st.text_input("🔎 Search within results", key="crud_read_search")
         try:
             df = load_table_filtered(crud_table)
-            if search_read:
+            if not df.empty and search_read:
                 mask = df.apply(
                     lambda col: col.astype(str).str.lower().str.contains(search_read.lower(), na=False)
                 ).any(axis=1)
                 df = df[mask]
             st.markdown(f"**{len(df):,} records in `{crud_table}`**")
             st.dataframe(df, use_container_width=True, height=400)
-            csv = df.to_csv(index=False).encode()
-            st.download_button("⬇️ Download as CSV", csv, f"{crud_table}_export.csv", "text/csv")
+            if not df.empty:
+                csv = df.to_csv(index=False).encode()
+                st.download_button("⬇️ Download as CSV", csv, f"{crud_table}_export.csv", "text/csv")
         except Exception as exc:
             st.error(f"Read error: {exc}")
- 
-    # ══════ UPDATE ════════════════════════════════════════════════════════════
+
     elif crud_op == "✏️ Update":
         st.markdown('<div class="section-header">✏️ Update an Existing Record</div>', unsafe_allow_html=True)
- 
+
         if crud_table == "providers":
             upd_id = st.text_input("Enter Provider ID to edit", placeholder="e.g. P001")
             if upd_id:
@@ -973,7 +1001,7 @@ elif page == "✏️ CRUD Operations":
                                      address=new_addr, contact=new_cont, id=upd_id),
                             ):
                                 st.success("Provider updated successfully!")
- 
+
         elif crud_table == "receivers":
             upd_id = st.text_input("Enter Receiver ID to edit", placeholder="e.g. R001")
             if upd_id:
@@ -1003,7 +1031,7 @@ elif page == "✏️ CRUD Operations":
                                      contact=new_cont, id=upd_id),
                             ):
                                 st.success("Receiver updated successfully!")
- 
+
         elif crud_table == "food_listings":
             upd_id = st.text_input("Enter Food ID to edit", placeholder="e.g. F001")
             if upd_id:
@@ -1017,16 +1045,16 @@ elif page == "✏️ CRUD Operations":
                         c1, c2 = st.columns(2)
                         new_fname = c1.text_input("Food Name", value=str(row.get("food_name", "")))
                         new_qty   = c2.number_input("Quantity", min_value=0, value=int(row.get("quantity", 0)))
- 
+
                         try:
                             exp_val = pd.to_datetime(row.get("expiry_date", date.today())).date()
                         except Exception:
                             exp_val = date.today()
- 
+
                         c3, c4 = st.columns(2)
                         new_exp = c3.date_input("Expiry Date", value=exp_val)
                         new_loc = c4.text_input("Location", value=str(row.get("location", "")))
- 
+
                         curr_ft = str(row.get("food_type", ""))
                         curr_mt = str(row.get("meal_type", ""))
                         c5, c6 = st.columns(2)
@@ -1049,7 +1077,7 @@ elif page == "✏️ CRUD Operations":
                                      meal_type=new_mt, location=new_loc, id=upd_id),
                             ):
                                 st.success("Food listing updated successfully!")
- 
+
         elif crud_table == "claims":
             upd_id = st.text_input("Enter Claim ID to edit", placeholder="e.g. C001")
             if upd_id:
@@ -1077,12 +1105,11 @@ elif page == "✏️ CRUD Operations":
                                 dict(status=new_status, ts=str(new_ts), id=upd_id),
                             ):
                                 st.success("Claim updated successfully!")
- 
-    # ══════ DELETE ════════════════════════════════════════════════════════════
+
     elif crud_op == "🗑️ Delete":
         st.markdown('<div class="section-header">🗑️ Delete a Record</div>', unsafe_allow_html=True)
         st.warning("⚠️ Deletion is permanent and may affect related records in other tables.")
- 
+
         ID_COLUMNS = {
             "providers":     "provider_id",
             "receivers":     "receiver_id",
@@ -1090,14 +1117,14 @@ elif page == "✏️ CRUD Operations":
             "claims":        "claim_id",
         }
         pk_col = ID_COLUMNS[crud_table]
- 
+
         try:
             preview_df = load_table_filtered(crud_table)
             st.markdown(f"**Records currently in `{crud_table}` (filtered view):**")
             st.dataframe(preview_df, use_container_width=True, height=220)
         except Exception as exc:
             st.error(f"Could not load preview: {exc}")
- 
+
         with st.form("form_delete_record"):
             del_id = st.text_input(
                 f"Enter `{pk_col}` of the record to delete",
@@ -1114,20 +1141,14 @@ elif page == "✏️ CRUD Operations":
                     f"DELETE FROM {crud_table} WHERE {pk_col} = :id", {"id": del_id}
                 ):
                     st.success(f"Record `{del_id}` deleted from `{crud_table}`.")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 14. PAGE: IMPORT CSVs
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "⬆️ Import CSVs":
     st.title("⬆️ Import CSV Files")
-    st.info(
-        "Upload each CSV file below to load it into the cloud database. "
-        "Expected tables: **providers**, **receivers**, **food_listings**, **claims**."
-    )
- 
-    st.markdown("### Upload CSV Files")
-    st.caption("Select the target table, then upload the matching CSV file.")
- 
+    st.info("Upload CSV files to populate cloud tables.")
+
     table_choice = st.selectbox(
         "Target Table",
         ["providers", "receivers", "food_listings", "claims"],
@@ -1140,58 +1161,52 @@ elif page == "⬆️ Import CSVs":
             with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
                 tmp.write(uploaded.read())
                 tmp_path = tmp.name
-            engine = get_engine()
-            ok, msg = import_csv(table_choice, tmp_path, engine)
+            ok, msg = import_csv(table_choice, tmp_path)
             box_cls = "success-box" if ok else "error-box"
             st.markdown(f'<div class="{box_cls}">{msg}</div>', unsafe_allow_html=True)
-            if ok:
-                run_query.clear()
- 
+
     st.markdown("---")
     st.markdown("### 📋 Import All Four Tables at Once")
-    st.caption("Upload all four CSVs below, then click **Import All**.")
- 
+
     up_providers     = st.file_uploader("providers CSV",     type=["csv"], key="bulk_providers")
     up_receivers     = st.file_uploader("receivers CSV",     type=["csv"], key="bulk_receivers")
     up_food_listings = st.file_uploader("food_listings CSV", type=["csv"], key="bulk_food")
     up_claims        = st.file_uploader("claims CSV",        type=["csv"], key="bulk_claims")
- 
+
     bulk_uploads = {
         "providers":     up_providers,
         "receivers":     up_receivers,
         "food_listings": up_food_listings,
         "claims":        up_claims,
     }
- 
+
     if st.button("🚀 Import All Uploaded CSVs", use_container_width=True):
         ready = {t: f for t, f in bulk_uploads.items() if f is not None}
         if not ready:
             st.warning("Please upload at least one CSV file first.")
         else:
-            engine = get_engine()
             all_ok = True
             for table, file_obj in ready.items():
                 with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
                     tmp.write(file_obj.read())
                     tmp_path = tmp.name
-                ok, msg = import_csv(table, tmp_path, engine)
+                ok, msg = import_csv(table, tmp_path)
                 box_cls = "success-box" if ok else "error-box"
                 st.markdown(f'<div class="{box_cls}">{msg}</div>', unsafe_allow_html=True)
                 if not ok:
                     all_ok = False
             if all_ok:
-                run_query.clear()
-                st.success("All uploaded tables imported! Cache refreshed.")
- 
+                st.success("All uploaded tables imported successfully!")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. PAGE: RAW SQL
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🔧 Raw SQL":
     st.title("🔧 Raw SQL Query Runner")
     st.warning("⚠️ Only SELECT / WITH queries are permitted.")
- 
+
     sql_input = st.text_area("Enter SQL", value="SELECT * FROM food_listings LIMIT 10;", height=180)
- 
+
     if st.button("▶ Run Query", use_container_width=False):
         stripped = sql_input.strip().lstrip("(").upper()
         if not (stripped.startswith("SELECT") or stripped.startswith("WITH")):
@@ -1201,11 +1216,12 @@ elif page == "🔧 Raw SQL":
                 df = run_query(sql_input)
                 st.success(f"{len(df):,} rows returned")
                 st.dataframe(df, use_container_width=True, height=400)
-                csv = df.to_csv(index=False).encode()
-                st.download_button("⬇️ Download CSV", csv, "query_result.csv", "text/csv")
+                if not df.empty:
+                    csv = df.to_csv(index=False).encode()
+                    st.download_button("⬇️ Download CSV", csv, "query_result.csv", "text/csv")
             except Exception as exc:
                 st.error(f"Query failed: {exc}")
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 16. FOOTER
 # ─────────────────────────────────────────────────────────────────────────────
