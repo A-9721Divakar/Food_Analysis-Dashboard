@@ -16,6 +16,7 @@ import os
 import re
 import tempfile
 from datetime import date
+ 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -164,47 +165,61 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🔍 CRUD Filters")
  
-    try:
-        cities_df = run_query(
-            "SELECT DISTINCT city FROM providers "
-            "UNION SELECT DISTINCT city FROM receivers ORDER BY city"
-        )
-        all_cities = ["All"] + cities_df["city"].dropna().tolist()
-    except Exception:
-        all_cities = ["All"]
+    with st.form("crud_filters_form"):
+        try:
+            cities_df = run_query(
+                "SELECT DISTINCT city FROM providers "
+                "UNION SELECT DISTINCT city FROM receivers ORDER BY city"
+            )
+            all_cities = ["All"] + cities_df["city"].dropna().tolist()
+        except Exception:
+            all_cities = ["All"]
  
-    sel_city   = st.selectbox("City", all_cities)
+        sel_city = st.selectbox("City", all_cities)
  
-    try:
-        ft_df   = run_query("SELECT DISTINCT food_type FROM food_listings ORDER BY food_type")
-        all_ft  = ["All"] + ft_df["food_type"].dropna().tolist()
-    except Exception:
-        all_ft = ["All"]
+        try:
+            ft_df  = run_query("SELECT DISTINCT food_type FROM food_listings ORDER BY food_type")
+            all_ft = ["All"] + ft_df["food_type"].dropna().tolist()
+        except Exception:
+            all_ft = ["All"]
  
-    sel_ft   = st.selectbox("Food Type", all_ft)
+        sel_ft = st.selectbox("Food Type", all_ft)
  
-    try:
-        mt_df   = run_query("SELECT DISTINCT meal_type FROM food_listings ORDER BY meal_type")
-        all_mt  = ["All"] + mt_df["meal_type"].dropna().tolist()
-    except Exception:
-        all_mt = ["All"]
+        try:
+            mt_df  = run_query("SELECT DISTINCT meal_type FROM food_listings ORDER BY meal_type")
+            all_mt = ["All"] + mt_df["meal_type"].dropna().tolist()
+        except Exception:
+            all_mt = ["All"]
  
-    sel_mt   = st.selectbox("Meal Type", all_mt)
+        sel_mt = st.selectbox("Meal Type", all_mt)
  
-    try:
-        cs_df   = run_query("SELECT DISTINCT status FROM claims ORDER BY status")
-        all_cs  = ["All"] + cs_df["status"].dropna().tolist()
-    except Exception:
-        all_cs = ["All"]
+        try:
+            cs_df  = run_query("SELECT DISTINCT status FROM claims ORDER BY status")
+            all_cs = ["All"] + cs_df["status"].dropna().tolist()
+        except Exception:
+            all_cs = ["All"]
  
-    sel_cs   = st.selectbox("Claim Status", all_cs)
+        sel_cs = st.selectbox("Claim Status", all_cs)
  
-    filters_submitted = st.button("🔎 Apply Filters", use_container_width=True)
+        filters_submitted = st.form_submit_button("Apply Filters", use_container_width=True)
  
-    city_filter = None if sel_city == "All" else sel_city
-    ft_filter   = None if sel_ft   == "All" else sel_ft
-    mt_filter   = None if sel_mt   == "All" else sel_mt
-    cs_filter   = None if sel_cs   == "All" else sel_cs
+    # Store active filter values in session state on submit
+    if filters_submitted:
+        st.session_state["active_city"] = sel_city
+        st.session_state["active_ft"]   = sel_ft
+        st.session_state["active_mt"]   = sel_mt
+        st.session_state["active_cs"]   = sel_cs
+ 
+    # Read active filters from session state (default to "All" on first load)
+    active_city = st.session_state.get("active_city", "All")
+    active_ft   = st.session_state.get("active_ft",   "All")
+    active_mt   = st.session_state.get("active_mt",   "All")
+    active_cs   = st.session_state.get("active_cs",   "All")
+ 
+    city_filter = None if active_city == "All" else active_city
+    ft_filter   = None if active_ft   == "All" else active_ft
+    mt_filter   = None if active_mt   == "All" else active_mt
+    cs_filter   = None if active_cs   == "All" else active_cs
  
     st.markdown("---")
     if st.button("🔄 Refresh Data Cache"):
@@ -571,7 +586,7 @@ elif page == "📊 Analysis":
             SELECT provider_type, SUM(quantity) AS total_quantity
             FROM food_listings GROUP BY provider_type ORDER BY total_quantity DESC LIMIT 1""",
  
-        "Q4 · Providers in Selected City": None,   # handled separately
+        "Q4 · Providers in Selected City": None,
  
         "Q5 · Receivers by Total Claimed Quantity": """
             SELECT r.name, SUM(f.quantity) AS total_claimed
