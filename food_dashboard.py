@@ -13,8 +13,8 @@ Cloud Configuration:
     host     = "your-cloud-db-host.tech"
     port     = 5432
     database = "Food_Analysis"
-    user     = "food_user"
-    password = "food1234"
+    user     = "your_username"
+    password = "your_password"
 """
 
 import os
