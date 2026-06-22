@@ -1,3 +1,4 @@
+
 """
 ╔══════════════════════════════════════════════════════════════════════╗
 ║        FOOD ANALYSIS DASHBOARD  — Streamlit + PostgreSQL            ║
@@ -8,7 +9,7 @@ Requirements (install once):
     pip install streamlit pandas plotly psycopg2-binary sqlalchemy
  
 1. Edit DB_CONFIG with your PostgreSQL credentials.
-2. Edit CSV_PATHS with the actual paths to your four CSV files.
+2. Add your PostgreSQL credentials to Streamlit Secrets (see Section 1 in the code).
 3. Run:  streamlit run food_dashboard.py
 """
  
@@ -23,22 +24,46 @@ import streamlit as st
 from sqlalchemy import create_engine, text
  
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. CONFIGURATION  ← Edit these before running
+# 1. CONFIGURATION — reads from st.secrets (Streamlit Cloud) or env vars
 # ─────────────────────────────────────────────────────────────────────────────
-DB_CONFIG = dict(
-    host="localhost",
-    port=5432,
-    database="Food_Analysis",
-    user="food_user",
-    password="food1234",
-)
+# On Streamlit Cloud add these in App Settings → Secrets:
+#
+#   [postgres]
+#   host     = "your-host.neon.tech"      # or Supabase / Railway / ElephantSQL
+#   port     = 5432
+#   database = "Food_Analysis"
+#   user     = "food_user"
+#   password = "your_password"
+#
+# Alternatively set a single DATABASE_URL secret:
+#   DATABASE_URL = "postgresql://food_user:password@host:5432/Food_Analysis"
  
-CSV_PATHS = dict(
-    providers     = r"C:/New folder/New folder/All Excel Practice Files/Food managment dataset/providers_data.csv",
-    receivers     = r"C:/New folder/New folder/All Excel Practice Files/Food managment dataset/receivers_data.csv",
-    food_listings = r"C:/New folder/New folder/All Excel Practice Files/Food managment dataset/food_listings_data.csv",
-    claims        = r"C:/New folder/New folder/All Excel Practice Files/Food managment dataset/claims_data.csv",
-)
+def _get_db_url() -> str | None:
+    """Return a SQLAlchemy DB URL from secrets or env, or None if not configured."""
+    # 1) Single DATABASE_URL secret / env var
+    url = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if url:
+        # Heroku-style URLs start with postgres:// — SQLAlchemy needs postgresql://
+        return url.replace("postgres://", "postgresql+psycopg2://", 1)
+    # 2) Structured [postgres] secret block
+    try:
+        pg = st.secrets["postgres"]
+        return (
+            f"postgresql+psycopg2://{pg['user']}:{pg['password']}"
+            f"@{pg['host']}:{pg.get('port', 5432)}/{pg['database']}"
+        )
+    except (KeyError, FileNotFoundError):
+        pass
+    # 3) Individual env vars (fallback for Docker / Railway / Render)
+    host = os.environ.get("DB_HOST")
+    if host:
+        return (
+            f"postgresql+psycopg2://{os.environ['DB_USER']}:{os.environ['DB_PASSWORD']}"
+            f"@{host}:{os.environ.get('DB_PORT', 5432)}/{os.environ['DB_DATABASE']}"
+        )
+    return None
+ 
+_DB_URL = _get_db_url()
  
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. PAGE CONFIG
@@ -96,11 +121,15 @@ section[data-testid="stSidebar"] * { color: #e8f0fe !important; }
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Connecting to database…")
 def get_engine():
-    url = (
-        f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
-        f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
-    )
-    return create_engine(url, pool_pre_ping=True)
+    if not _DB_URL:
+        st.error(
+            "⚙️ **Database not configured.** "
+            "Add your PostgreSQL credentials in **App Settings → Secrets** "
+            "(see the comment at the top of `food_dashboard.py` for the exact format), "
+            "then reboot the app."
+        )
+        st.stop()
+    return create_engine(_DB_URL, pool_pre_ping=True)
  
  
 @st.cache_data(ttl=120, show_spinner=False)
@@ -1091,41 +1120,23 @@ elif page == "✏️ CRUD Operations":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "⬆️ Import CSVs":
     st.title("⬆️ Import CSV Files")
-    st.info("Click **Import All** to load/refresh all four CSV files into the database, or upload individually below.")
+    st.info(
+        "Upload each CSV file below to load it into the cloud database. "
+        "Expected tables: **providers**, **receivers**, **food_listings**, **claims**."
+    )
  
-    st.markdown("### Configured CSV Paths")
-    for k, v in CSV_PATHS.items():
-        icon = "✅" if os.path.exists(v) else "❌"
-        st.markdown(f"- **{k}**: `{v}` {icon}")
+    st.markdown("### Upload CSV Files")
+    st.caption("Select the target table, then upload the matching CSV file.")
  
-    st.markdown("---")
-    col_a, col_b = st.columns(2)
- 
-    with col_a:
-        if st.button("🚀 Import All CSVs", use_container_width=True):
-            engine = get_engine()
-            TABLE_MAP = {
-                "providers":     CSV_PATHS["providers"],
-                "receivers":     CSV_PATHS["receivers"],
-                "food_listings": CSV_PATHS["food_listings"],
-                "claims":        CSV_PATHS["claims"],
-            }
-            all_ok = True
-            for table, path in TABLE_MAP.items():
-                ok, msg = import_csv(table, path, engine)
-                box_cls = "success-box" if ok else "error-box"
-                st.markdown(f'<div class="{box_cls}">{msg}</div>', unsafe_allow_html=True)
-                if not ok:
-                    all_ok = False
-            if all_ok:
-                run_query.clear()
-                st.success("All tables imported! Cache refreshed.")
- 
-    with col_b:
-        st.markdown("### Upload a CSV Manually")
-        table_choice = st.selectbox("Target Table", ["providers", "receivers", "food_listings", "claims"])
-        uploaded = st.file_uploader("Choose CSV", type=["csv"])
-        if uploaded and st.button("Import Uploaded CSV"):
+    table_choice = st.selectbox(
+        "Target Table",
+        ["providers", "receivers", "food_listings", "claims"],
+    )
+    uploaded = st.file_uploader(
+        f"Upload CSV for **{table_choice}**", type=["csv"], key=f"upload_{table_choice}"
+    )
+    if uploaded:
+        if st.button("⬆️ Import to Database", use_container_width=True, type="primary"):
             with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
                 tmp.write(uploaded.read())
                 tmp_path = tmp.name
@@ -1135,6 +1146,42 @@ elif page == "⬆️ Import CSVs":
             st.markdown(f'<div class="{box_cls}">{msg}</div>', unsafe_allow_html=True)
             if ok:
                 run_query.clear()
+ 
+    st.markdown("---")
+    st.markdown("### 📋 Import All Four Tables at Once")
+    st.caption("Upload all four CSVs below, then click **Import All**.")
+ 
+    up_providers     = st.file_uploader("providers CSV",     type=["csv"], key="bulk_providers")
+    up_receivers     = st.file_uploader("receivers CSV",     type=["csv"], key="bulk_receivers")
+    up_food_listings = st.file_uploader("food_listings CSV", type=["csv"], key="bulk_food")
+    up_claims        = st.file_uploader("claims CSV",        type=["csv"], key="bulk_claims")
+ 
+    bulk_uploads = {
+        "providers":     up_providers,
+        "receivers":     up_receivers,
+        "food_listings": up_food_listings,
+        "claims":        up_claims,
+    }
+ 
+    if st.button("🚀 Import All Uploaded CSVs", use_container_width=True):
+        ready = {t: f for t, f in bulk_uploads.items() if f is not None}
+        if not ready:
+            st.warning("Please upload at least one CSV file first.")
+        else:
+            engine = get_engine()
+            all_ok = True
+            for table, file_obj in ready.items():
+                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                    tmp.write(file_obj.read())
+                    tmp_path = tmp.name
+                ok, msg = import_csv(table, tmp_path, engine)
+                box_cls = "success-box" if ok else "error-box"
+                st.markdown(f'<div class="{box_cls}">{msg}</div>', unsafe_allow_html=True)
+                if not ok:
+                    all_ok = False
+            if all_ok:
+                run_query.clear()
+                st.success("All uploaded tables imported! Cache refreshed.")
  
 # ─────────────────────────────────────────────────────────────────────────────
 # 15. PAGE: RAW SQL
