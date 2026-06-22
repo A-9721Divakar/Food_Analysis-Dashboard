@@ -1,6 +1,4 @@
 
-        FOOD ANALYSIS DASHBOARD  — Streamlit + PostgreSQL            
-        Run:  streamlit run food_dashboard.py 
 
 Requirements (install once):
     pip install streamlit pandas plotly psycopg2-binary sqlalchemy
