@@ -1,4 +1,8 @@
-
+"""
+╔══════════════════════════════════════════════════════════════════════╗
+║        FOOD ANALYSIS DASHBOARD  — Streamlit + PostgreSQL            ║
+║    Run:  streamlit run food_dashboard.py                             ║
+╚══════════════════════════════════════════════════════════════════════╝
 
 Requirements (install once):
     pip install streamlit pandas plotly psycopg2-binary sqlalchemy
@@ -11,7 +15,6 @@ import os
 import re
 import tempfile
 from datetime import date
-
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -22,19 +25,16 @@ from sqlalchemy import create_engine, text
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_db_url() -> str | None:
     """Return a SQLAlchemy DB URL from secrets, session state, or env vars."""
-    # Check if user injected credentials via fallback sidebar inputs
     if st.session_state.get("db_host"):
         return (
             f"postgresql+psycopg2://{st.session_state.get('db_user')}:{st.session_state.get('db_password')}"
             f"@{st.session_state.get('db_host')}:{st.session_state.get('db_port', 5432)}/{st.session_state.get('db_database')}"
         )
 
-    # 1) Single DATABASE_URL secret / env var
     url = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
     if url:
         return url.replace("postgres://", "postgresql+psycopg2://", 1)
         
-    # 2) Structured [postgres] secret block
     try:
         pg = st.secrets["postgres"]
         return (
@@ -44,7 +44,6 @@ def _get_db_url() -> str | None:
     except (KeyError, FileNotFoundError):
         pass
         
-    # 3) Individual env vars
     host = os.environ.get("DB_HOST")
     if host:
         return (
@@ -117,7 +116,7 @@ def get_engine(url_str):
 def run_query(sql: str, params: dict | None = None) -> pd.DataFrame:
     _DB_URL = _get_db_url()
     if not _DB_URL:
-        return pd.DataFrame() # Return empty layout safely if missing db URL
+        return pd.DataFrame() 
     engine = get_engine(_DB_URL)
     with engine.connect() as conn:
         return pd.read_sql(text(sql), conn, params=params or {})
@@ -185,7 +184,6 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # Render Fallback connection panel if secrets are empty
     if not _get_db_url():
         st.markdown("### ⚙️ DB Credentials Missing")
         st.caption("Provide connection details here directly to test the app live:")
@@ -208,7 +206,6 @@ with st.sidebar:
 
     st.markdown("### 🔍 CRUD Filters")
 
-    # Fetch unique selections safely
     try:
         cities_df = run_query(
             "SELECT DISTINCT city FROM providers "
@@ -236,7 +233,6 @@ with st.sidebar:
     except Exception:
         all_cs = ["All"]
 
-    # Form containing variables 
     with st.form("crud_filters_form"):
         sel_city = st.selectbox("City", all_cities)
         sel_ft = st.selectbox("Food Type", all_ft)
@@ -244,14 +240,12 @@ with st.sidebar:
         sel_cs = st.selectbox("Claim Status", all_cs)
         filters_submitted = st.form_submit_button("Apply Filters", use_container_width=True)
 
-    # RESOLVED SUBMIT BUTTON WARNING: Action statement executes properly outside form container
     if filters_submitted:
         st.session_state["active_city"] = sel_city
         st.session_state["active_ft"]   = sel_ft
         st.session_state["active_mt"]   = sel_mt
         st.session_state["active_cs"]   = sel_cs
 
-    # Read current active selections
     active_city = st.session_state.get("active_city", "All")
     active_ft   = st.session_state.get("active_ft",   "All")
     active_mt   = st.session_state.get("active_mt",   "All")
@@ -271,7 +265,6 @@ def build_where(*conditions):
     parts = [c for c in conditions if c]
     return ("WHERE " + " AND ".join(parts)) if parts else ""
 
-# Check for validation configurations globally
 if not _get_db_url():
     st.title("🍱 Food Analysis Dashboard")
     st.info("👋 Welcome! Your dashboard deployment framework is running smoothly.")
